@@ -54,6 +54,10 @@ The frontend will start at http://localhost:5173
 - `POST /api/generate-tests` - Generate test cases from acceptance criteria
 - `POST /api/execute-tests` - Execute test cases and get results
 
+## Application Flow
+
+![Flow Diagram](docs/flow-diagram.png)
+
 ## Usage
 
 1. Enter your user story (optional) and acceptance criteria
@@ -61,3 +65,12 @@ The frontend will start at http://localhost:5173
 3. Review the generated positive, negative, and edge case tests
 4. Click "Execute All Tests" to simulate test execution
 5. View detailed results with pass/fail status and step-by-step execution logs
+
+## Live Demo
+
+- **Frontend**: https://test-automation-app-n4xvs38w.devinapps.com
+- **Backend API**: https://app-kfiyeblo.fly.dev
+
+## Documentation
+
+See the [Complete Guide](docs/GUIDE.md) for detailed setup instructions, API reference, architecture overview, and troubleshooting.
