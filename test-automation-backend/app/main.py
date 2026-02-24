@@ -1,47 +1,71 @@
+"""Main FastAPI application for test automation backend.
+
+This module exposes two endpoints:
+- POST /api/generate-tests: ask the AI to generate test cases from acceptance criteria
+- POST /api/execute-tests: ask the AI to simulate executing test cases and return results
+
+The code is intentionally defensive around AI responses (strip code fences, validate JSON).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-import json
-import os
-from dotenv import load_dotenv
+
 from google import genai
+
 
 load_dotenv()
 
+
 app = FastAPI()
 
-# Disable CORS. Do not remove this for full-stack development.
+# Allow all origins during local full-stack development (not recommended for production).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
+# -----------------------------
+# Pydantic models (request/response)
+# -----------------------------
+
+
 class GenerateTestsRequest(BaseModel):
+    """Request payload for generating tests."""
+
     acceptance_criteria: str
     user_story: Optional[str] = None
 
 
 class TestCase(BaseModel):
+    """Represents a single test case returned by the AI."""
+
     id: int
     type: str  # "positive", "negative", "edge_case"
     title: str
     description: str
-    steps: list[str]
+    steps: List[str]
     expected_result: str
 
 
 class GenerateTestsResponse(BaseModel):
-    test_cases: list[TestCase]
+    test_cases: List[TestCase]
     acceptance_criteria: str
 
 
 class ExecuteTestsRequest(BaseModel):
-    test_cases: list[TestCase]
+    test_cases: List[TestCase]
     acceptance_criteria: str
 
 
@@ -58,14 +82,15 @@ class TestResult(BaseModel):
     status: str  # "PASS", "FAIL", "ERROR"
     actual_result: str
     details: str
-    steps_executed: list[StepResult]
+    steps_executed: List[StepResult]
 
 
 class ExecuteTestsResponse(BaseModel):
-    results: list[TestResult]
-    summary: dict
+    results: List[TestResult]
+    summary: Dict[str, Any]
 
 
+# Preferred Gemini models (ordered by preference).
 GEMINI_MODELS = [
     "gemini-2.5-flash-lite",
     "gemini-2.0-flash-lite",
@@ -74,33 +99,52 @@ GEMINI_MODELS = [
 ]
 
 
-def get_gemini_client() -> genai.Client:
+def get_gemini_client() -> Any:
+    """Create and return a Gemini client.
+
+    We return a runtime client; any missing API key is surfaced as an HTTP 500.
+    The return type is kept generic to avoid tight coupling to the SDK typing.
+    """
+
     key = os.getenv("GEMINI_API_KEY", "")
     if not key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
     return genai.Client(api_key=key)
 
 
-def generate_with_fallback(client: genai.Client, prompt: str) -> str:
-    """Try multiple Gemini models with fallback."""
-    last_error = None
+def generate_with_fallback(client: Any, prompt: str) -> str:
+    """Attempt generation across multiple models until one returns text.
+
+    The AI SDK can fail for individual models; try the list in order and raise
+    the last exception if none succeed.
+    """
+
+    last_error: Optional[Exception] = None
     for model_name in GEMINI_MODELS:
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
-            if response.text:
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            # The SDK returns an object with a `text` attribute on success.
+            if getattr(response, "text", None):
                 return response.text
-        except Exception as e:
+        except Exception as e:  # Catch SDK and network errors per-model.
             last_error = e
             continue
+
+    # If we reached here, no model returned usable text.
     if last_error:
-        raise last_error
+        # Surface the SDK error for debugging in logs; convert to HTTP error for API clients.
+        raise HTTPException(status_code=502, detail=f"AI models failed: {last_error}")
+
     raise HTTPException(status_code=500, detail="All AI models failed to respond")
 
 
 def clean_json_response(content: str) -> str:
+    """Strip common code fences and whitespace from AI responses.
+
+    AI responses sometimes include Markdown fences like ```json ... ```; remove them
+    so `json.loads` can parse the payload.
+    """
+
     content = content.strip()
     if content.startswith("```json"):
         content = content[7:]
@@ -111,18 +155,23 @@ def clean_json_response(content: str) -> str:
     return content.strip()
 
 
+# Simple health check used by load balancers / orchestrators.
 @app.get("/healthz")
-async def healthz():
+async def healthz() -> Dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/api/generate-tests", response_model=GenerateTestsResponse)
-async def generate_tests(request: GenerateTestsRequest):
+async def generate_tests(request: GenerateTestsRequest) -> GenerateTestsResponse:
+    """Call the AI to generate 3 test cases from the given acceptance criteria.
+
+    The endpoint validates the AI response and converts it into `TestCase` models.
+    """
+
     client = get_gemini_client()
 
-    user_story_context = ""
-    if request.user_story:
-        user_story_context = f"\nUser Story: {request.user_story}\n"
+    # Optional user story context appended to the prompt.
+    user_story_context = f"\nUser Story: {request.user_story}\n" if request.user_story else ""
 
     prompt = f"""You are a senior QA engineer. Given the following acceptance criteria{' and user story' if request.user_story else ''}, generate exactly 3 test cases:
 
@@ -169,12 +218,14 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
         content = generate_with_fallback(client, prompt)
         content = clean_json_response(content)
         parsed = json.loads(content)
+
+        # Validate shape before constructing Pydantic objects.
+        if "test_cases" not in parsed or not isinstance(parsed["test_cases"], list):
+            raise HTTPException(status_code=502, detail="AI returned unexpected structure for test_cases")
+
         test_cases = [TestCase(**tc) for tc in parsed["test_cases"]]
 
-        return GenerateTestsResponse(
-            test_cases=test_cases,
-            acceptance_criteria=request.acceptance_criteria
-        )
+        return GenerateTestsResponse(test_cases=test_cases, acceptance_criteria=request.acceptance_criteria)
 
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
@@ -185,8 +236,16 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
 
 
 @app.post("/api/execute-tests", response_model=ExecuteTestsResponse)
-async def execute_tests(request: ExecuteTestsRequest):
+async def execute_tests(request: ExecuteTestsRequest) -> ExecuteTestsResponse:
+    """Ask the AI to simulate executing test cases and return structured results.
+
+    The endpoint computes a small summary (pass/fail counts) from the AI response.
+    """
+
     client = get_gemini_client()
+
+    # Provide the test cases as JSON for the AI to reason about.
+    test_cases_json = json.dumps([tc.model_dump() for tc in request.test_cases], indent=2)
 
     prompt = f"""You are a test execution engine. Given the following acceptance criteria and test cases, simulate executing each test case and determine whether it would PASS or FAIL.
 
@@ -194,7 +253,7 @@ Acceptance Criteria:
 {request.acceptance_criteria}
 
 Test Cases:
-{json.dumps([tc.model_dump() for tc in request.test_cases], indent=2)}
+{test_cases_json}
 
 For each test case, simulate its execution step by step. Determine if the test would PASS or FAIL based on the acceptance criteria.
 
@@ -226,9 +285,9 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
 
     try:
         content = generate_with_fallback(client, prompt)
-
         content = clean_json_response(content)
         parsed = json.loads(content)
+
         results = [TestResult(**r) for r in parsed.get("results", [])]
 
         total = len(results)
@@ -241,7 +300,7 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
             "passed": passed,
             "failed": failed,
             "errored": errored,
-            "pass_rate": f"{(passed / total * 100):.1f}%" if total > 0 else "0%"
+            "pass_rate": f"{(passed / total * 100):.1f}%" if total > 0 else "0%",
         }
 
         return ExecuteTestsResponse(results=results, summary=summary)
