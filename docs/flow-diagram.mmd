@@ -1,0 +1,60 @@
+flowchart TD
+    A[User Opens Application] --> B[Input Tab]
+    B --> C{Enter Acceptance Criteria}
+    C --> |Optional| D[Enter User Story]
+    C --> E[Click Generate Test Cases]
+    D --> E
+    
+    E --> F[Frontend sends POST /api/generate-tests]
+    F --> G[Backend receives request]
+    G --> H[Construct AI prompt with criteria]
+    H --> I[Send to Google Gemini API]
+    
+    I --> J{Gemini Model Selection}
+    J --> |Try 1| K[gemini-2.5-flash-lite]
+    J --> |Fallback 2| L[gemini-2.0-flash-lite]
+    J --> |Fallback 3| M[gemini-2.0-flash]
+    J --> |Fallback 4| N[gemini-2.5-flash]
+    
+    K --> O[Parse AI JSON Response]
+    L --> O
+    M --> O
+    N --> O
+    
+    O --> P[Return 3 Test Cases]
+    P --> Q[Frontend displays Test Cases Tab]
+    
+    Q --> R{User Reviews Test Cases}
+    R --> S[Positive Test Case]
+    R --> T[Negative Test Case]
+    R --> U[Edge Case Test Case]
+    
+    S --> V[Click Execute All Tests]
+    T --> V
+    U --> V
+    
+    V --> W[Frontend sends POST /api/execute-tests]
+    W --> X[Backend constructs execution prompt]
+    X --> Y[Send test cases + criteria to Gemini]
+    Y --> Z[AI simulates step-by-step execution]
+    
+    Z --> AA[Parse execution results]
+    AA --> BB[Calculate summary statistics]
+    BB --> CC[Return results with pass/fail status]
+    
+    CC --> DD[Frontend displays Results Tab]
+    DD --> EE[Summary: Total Passed Failed Errors Pass Rate]
+    DD --> FF[Detailed Results with step-by-step logs]
+    
+    FF --> GG{Each Test Result}
+    GG --> HH[PASS]
+    GG --> II[FAIL]
+    GG --> JJ[ERROR]
+
+    style A fill:#e0e7ff,stroke:#4f46e5
+    style E fill:#e0e7ff,stroke:#4f46e5
+    style V fill:#d1fae5,stroke:#059669
+    style DD fill:#fef3c7,stroke:#d97706
+    style HH fill:#d1fae5,stroke:#059669
+    style II fill:#fee2e2,stroke:#dc2626
+    style JJ fill:#fef3c7,stroke:#d97706
