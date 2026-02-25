@@ -21,7 +21,13 @@ AI Test Automation is a full-stack web application that leverages Google Gemini 
 - **Negative Test Case**: Tests error handling, invalid inputs, and boundary violations
 - **Edge Case Test Case**: Tests unusual but valid scenarios and boundary conditions
 
-After generating test cases, the AI simulates their execution step-by-step and produces detailed pass/fail results with explanations.
+The application supports **three execution modes**:
+
+| Mode | Description | Requires URL? |
+|------|-------------|---------------|
+| **AI Simulation** | AI reasons about test outcomes based on acceptance criteria | No |
+| **HTTP Testing** | Real HTTP requests (GET, POST, etc.) against a target URL via httpx | Yes |
+| **Browser Testing** | Headless Chromium browser automation via Playwright | Yes |
 
 ---
 
@@ -42,9 +48,11 @@ After generating test cases, the AI simulates their execution step-by-step and p
 
 | Layer     | Technology                                      |
 |-----------|--------------------------------------------------|
-| Frontend  | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui |
+| Frontend  | React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui |
 | Backend   | Python 3.12, FastAPI, Pydantic, Poetry           |
 | AI Engine | Google Gemini 2.5 Flash Lite (with fallback models) |
+| HTTP Testing | httpx (async HTTP client)                     |
+| Browser Testing | Playwright (headless Chromium)              |
 | Deployment| Fly.io (backend), Devin Apps (frontend)          |
 
 ---
@@ -154,6 +162,9 @@ echo "GEMINI_API_KEY=your_api_key_here" > .env
 # Install Python dependencies using Poetry
 poetry install
 
+# Install Playwright browsers (required for Browser Testing mode)
+poetry run playwright install chromium
+
 # Start the development server
 poetry run fastapi dev app/main.py
 ```
@@ -237,16 +248,27 @@ Each test case includes:
 - **Steps**: Ordered list of actions to perform
 - **Expected Result**: What should happen when the test passes
 
-### Step 3: Execute Test Cases
+### Step 3: Select Execution Mode
 
-Navigate to the **Test Cases** tab and click **"Execute All Tests"**. The AI will:
+Before executing, choose an **Execution Mode**:
 
-1. Simulate executing each test case step by step
-2. Evaluate each step against the acceptance criteria
-3. Determine if each test PASSES or FAILS
-4. Provide detailed explanations for the results
+| Mode | When to Use | What Happens |
+|------|-------------|-------------|
+| **AI Simulation** | Requirements validation, early-stage testing | AI reasons about outcomes—no real requests made |
+| **HTTP Testing** | API testing, endpoint validation | Real HTTP requests sent to a target URL |
+| **Browser Testing** | E2E testing, UI verification | Headless Chromium navigates, clicks, fills forms |
 
-### Step 4: Review Results
+For **HTTP** or **Browser** modes, enter the **Target URL** of the application you want to test (e.g., `https://httpbin.org` or `https://example.com`).
+
+### Step 4: Execute Test Cases
+
+Click **"Execute All Tests"**. Depending on the mode:
+
+- **AI Simulation**: The AI simulates executing each test step by step and evaluates pass/fail based on the acceptance criteria.
+- **HTTP Testing**: The AI generates an HTTP request plan, then the backend executes real HTTP requests against the target URL and reports actual status codes.
+- **Browser Testing**: The AI generates a browser action plan (goto, click, fill, etc.), then Playwright executes those actions in a real headless Chromium browser.
+
+### Step 5: Review Results
 
 The **Results** tab shows:
 
@@ -306,7 +328,7 @@ Content-Type: application/json
 }
 ```
 
-### Execute Test Cases
+### Execute Test Cases (AI Simulation)
 
 ```
 POST /api/execute-tests
@@ -324,30 +346,59 @@ Content-Type: application/json
 **Response:**
 ```json
 {
-  "results": [
-    {
-      "test_case_id": 1,
-      "test_case_title": "Test title",
-      "test_type": "positive",
-      "status": "PASS",
-      "actual_result": "What happened",
-      "details": "Detailed explanation",
-      "steps_executed": [
-        {
-          "step": "Step description",
-          "status": "PASS",
-          "output": "Step output"
-        }
-      ]
-    }
-  ],
-  "summary": {
-    "total": 3,
-    "passed": 2,
-    "failed": 1,
-    "errored": 0,
-    "pass_rate": "66.7%"
-  }
+  "results": [...],
+  "summary": { "total": 3, "passed": 2, "failed": 1, "errored": 0, "pass_rate": "66.7%" },
+  "execution_mode": "ai_simulated"
+}
+```
+
+### Execute Test Cases (HTTP Testing)
+
+```
+POST /api/execute-tests-http
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "test_cases": [/* array of test case objects */],
+  "acceptance_criteria": "string",
+  "target_url": "https://httpbin.org"
+}
+```
+
+**Response:**
+```json
+{
+  "results": [...],
+  "summary": { "total": 3, "passed": 2, "failed": 1, "errored": 0, "pass_rate": "66.7%" },
+  "execution_mode": "http"
+}
+```
+
+### Execute Test Cases (Browser Testing)
+
+```
+POST /api/execute-tests-browser
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "test_cases": [/* array of test case objects */],
+  "acceptance_criteria": "string",
+  "target_url": "https://example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "results": [...],
+  "summary": { "total": 3, "passed": 2, "failed": 1, "errored": 0, "pass_rate": "66.7%" },
+  "execution_mode": "browser"
 }
 ```
 
@@ -380,6 +431,7 @@ ai-test-automation/
     |       +-- ui/                    # shadcn/ui components
     |           +-- button.tsx
     |           +-- card.tsx
+    |           +-- input.tsx
     |           +-- textarea.tsx
     |           +-- badge.tsx
     |           +-- separator.tsx
@@ -404,6 +456,8 @@ ai-test-automation/
 | Frontend can't connect to backend | Check that backend is running on port 8000 and `.env` has correct `VITE_API_URL` |
 | CORS errors in browser | The backend has CORS configured to allow all origins - restart the backend |
 | "Failed to parse AI response" | Retry the request - occasionally AI responses may not be valid JSON |
+| Playwright not installed | Run `poetry run playwright install chromium` in the backend directory |
+| Browser testing timeout | The target site may be slow; try a simpler URL like `https://example.com` |
 | Poetry not found | Install Poetry: `curl -sSL https://install.python-poetry.org | python3 -` |
 
 ### Getting a Free Gemini API Key

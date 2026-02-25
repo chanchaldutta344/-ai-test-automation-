@@ -1,17 +1,20 @@
 """Main FastAPI application for test automation backend.
 
-This module exposes two endpoints:
-- POST /api/generate-tests: ask the AI to generate test cases from acceptance criteria
-- POST /api/execute-tests: ask the AI to simulate executing test cases and return results
-
-The code is intentionally defensive around AI responses (strip code fences, validate JSON).
+This module exposes endpoints for:
+- POST /api/generate-tests: AI-powered test case generation from acceptance criteria
+- POST /api/execute-tests: AI-simulated test execution
+- POST /api/execute-tests-http: Real HTTP testing against a live URL
+- POST /api/execute-tests-browser: Real browser testing with Playwright against a live URL
 """
 
 from __future__ import annotations
 
 import json
 import os
+import traceback
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -69,6 +72,14 @@ class ExecuteTestsRequest(BaseModel):
     acceptance_criteria: str
 
 
+class ExecuteTestsRealRequest(BaseModel):
+    """Request payload for real HTTP or browser-based test execution."""
+
+    test_cases: List[TestCase]
+    acceptance_criteria: str
+    target_url: str
+
+
 class StepResult(BaseModel):
     step: str
     status: str
@@ -88,6 +99,7 @@ class TestResult(BaseModel):
 class ExecuteTestsResponse(BaseModel):
     results: List[TestResult]
     summary: Dict[str, Any]
+    execution_mode: str = "ai_simulated"
 
 
 # Preferred Gemini models (ordered by preference).
@@ -153,6 +165,21 @@ def clean_json_response(content: str) -> str:
     if content.endswith("```"):
         content = content[:-3]
     return content.strip()
+
+
+def build_summary(results: List[TestResult]) -> Dict[str, Any]:
+    """Build a summary dict from test results."""
+    total = len(results)
+    passed = sum(1 for r in results if r.status == "PASS")
+    failed = sum(1 for r in results if r.status == "FAIL")
+    errored = sum(1 for r in results if r.status == "ERROR")
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "errored": errored,
+        "pass_rate": f"{(passed / total * 100):.1f}%" if total > 0 else "0%",
+    }
 
 
 # Simple health check used by load balancers / orchestrators.
@@ -289,21 +316,9 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
         parsed = json.loads(content)
 
         results = [TestResult(**r) for r in parsed.get("results", [])]
+        summary = build_summary(results)
 
-        total = len(results)
-        passed = sum(1 for r in results if r.status == "PASS")
-        failed = sum(1 for r in results if r.status == "FAIL")
-        errored = sum(1 for r in results if r.status == "ERROR")
-
-        summary = {
-            "total": total,
-            "passed": passed,
-            "failed": failed,
-            "errored": errored,
-            "pass_rate": f"{(passed / total * 100):.1f}%" if total > 0 else "0%",
-        }
-
-        return ExecuteTestsResponse(results=results, summary=summary)
+        return ExecuteTestsResponse(results=results, summary=summary, execution_mode="ai_simulated")
 
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
@@ -311,3 +326,438 @@ Return ONLY valid JSON, no markdown code blocks or extra text."""
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error executing tests: {str(e)}")
+
+
+# --------------------------
+# Execute tests - Real HTTP Testing
+# --------------------------
+
+@app.post("/api/execute-tests-http", response_model=ExecuteTestsResponse)
+async def execute_tests_http(request: ExecuteTestsRealRequest) -> ExecuteTestsResponse:
+    """Execute test cases by making real HTTP requests to the target URL."""
+
+    client = get_gemini_client()
+    target_url = request.target_url.rstrip("/")
+    test_cases_json = json.dumps([tc.model_dump() for tc in request.test_cases], indent=2)
+
+    prompt = f"""You are a QA automation engineer. Given acceptance criteria, test cases, and a target URL, generate an HTTP test plan for each test case.
+
+Target URL: {target_url}
+Acceptance Criteria: {request.acceptance_criteria}
+
+Test Cases:
+{test_cases_json}
+
+For each test case, generate a list of HTTP requests to execute. Return a JSON object:
+{{
+  "test_plans": [
+    {{
+      "test_case_id": 1,
+      "requests": [
+        {{
+          "method": "GET",
+          "path": "/",
+          "headers": {{}},
+          "body": null,
+          "expected_status": 200,
+          "description": "Load the homepage"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Use realistic HTTP methods and paths based on the acceptance criteria
+- For login tests, try POST /login, POST /api/login, POST /auth/login etc.
+- For page loads, use GET requests
+- Include appropriate headers (Content-Type: application/json for API calls)
+- expected_status should be realistic (200 for success, 401/403 for unauthorized, 400 for bad input)
+
+Return ONLY valid JSON, no markdown code blocks or extra text."""
+
+    try:
+        content = generate_with_fallback(client, prompt)
+        content = clean_json_response(content)
+        test_plans = json.loads(content)
+        results: List[TestResult] = []
+
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http_client:
+            for plan in test_plans.get("test_plans", []):
+                test_case_id = plan["test_case_id"]
+                matching_tc = next(
+                    (tc for tc in request.test_cases if tc.id == test_case_id), None
+                )
+                if not matching_tc:
+                    continue
+
+                steps_executed: List[StepResult] = []
+                overall_status = "PASS"
+                actual_results: List[str] = []
+
+                for req in plan.get("requests", []):
+                    method = req.get("method", "GET").upper()
+                    path = req.get("path", "/")
+                    headers = req.get("headers", {})
+                    body = req.get("body")
+                    expected_status = req.get("expected_status", 200)
+                    description = req.get("description", f"{method} {path}")
+                    url = f"{target_url}{path}"
+
+                    try:
+                        if method == "POST":
+                            resp = await http_client.post(url, headers=headers, json=body)
+                        elif method == "PUT":
+                            resp = await http_client.put(url, headers=headers, json=body)
+                        elif method == "DELETE":
+                            resp = await http_client.delete(url, headers=headers)
+                        elif method == "PATCH":
+                            resp = await http_client.patch(url, headers=headers, json=body)
+                        else:
+                            resp = await http_client.get(url, headers=headers)
+
+                        status_match = resp.status_code == expected_status
+                        step_status = "PASS" if status_match else "FAIL"
+                        if not status_match:
+                            overall_status = "FAIL"
+                        response_preview = resp.text[:200] if resp.text else "(empty)"
+                        step_output = (
+                            f"HTTP {resp.status_code} (expected {expected_status}). "
+                            f"Response: {response_preview}"
+                        )
+                        steps_executed.append(StepResult(
+                            step=f"{description} [{method} {path}]",
+                            status=step_status,
+                            output=step_output,
+                        ))
+                        actual_results.append(f"{method} {path} -> {resp.status_code}")
+
+                    except httpx.ConnectError:
+                        overall_status = "FAIL"
+                        steps_executed.append(StepResult(
+                            step=f"{description} [{method} {path}]",
+                            status="FAIL",
+                            output=f"Connection refused: {url}",
+                        ))
+                        actual_results.append(f"{method} {path} -> Connection refused")
+                    except httpx.TimeoutException:
+                        overall_status = "FAIL"
+                        steps_executed.append(StepResult(
+                            step=f"{description} [{method} {path}]",
+                            status="FAIL",
+                            output=f"Timeout: {url}",
+                        ))
+                        actual_results.append(f"{method} {path} -> Timeout")
+                    except Exception as exc:
+                        overall_status = "ERROR"
+                        steps_executed.append(StepResult(
+                            step=f"{description} [{method} {path}]",
+                            status="ERROR",
+                            output=f"Error: {str(exc)}",
+                        ))
+                        actual_results.append(f"{method} {path} -> Error")
+
+                results.append(TestResult(
+                    test_case_id=test_case_id,
+                    test_case_title=matching_tc.title,
+                    test_type=matching_tc.type,
+                    status=overall_status,
+                    actual_result="; ".join(actual_results),
+                    details=f"Executed {len(steps_executed)} HTTP request(s) against {target_url}",
+                    steps_executed=steps_executed,
+                ))
+
+        summary = build_summary(results)
+        return ExecuteTestsResponse(
+            results=results, summary=summary, execution_mode="http_real"
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to parse AI test plan: {str(e)}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error in HTTP test execution: {str(e)}"
+        )
+
+
+# --------------------------
+# Execute tests - Real Browser Testing (Playwright)
+# --------------------------
+
+@app.post("/api/execute-tests-browser", response_model=ExecuteTestsResponse)
+async def execute_tests_browser(request: ExecuteTestsRealRequest) -> ExecuteTestsResponse:
+    """Execute test cases using a real headless browser via Playwright."""
+
+    from playwright.async_api import async_playwright
+
+    client = get_gemini_client()
+    target_url = request.target_url.rstrip("/")
+    test_cases_json = json.dumps([tc.model_dump() for tc in request.test_cases], indent=2)
+
+    prompt = f"""You are a browser test automation expert. Given acceptance criteria, test cases, and a target URL, generate a browser test plan for each test case.
+
+Target URL: {target_url}
+Acceptance Criteria: {request.acceptance_criteria}
+
+Test Cases:
+{test_cases_json}
+
+For each test case, generate a list of browser actions. Return a JSON object:
+{{
+  "test_plans": [
+    {{
+      "test_case_id": 1,
+      "actions": [
+        {{"action": "goto", "url": "{target_url}", "description": "Navigate to the page"}},
+        {{"action": "check_title", "expected": "My App", "description": "Verify page title"}},
+        {{"action": "check_visible", "selector": "input[type=email]", "description": "Check email input visible"}},
+        {{"action": "fill", "selector": "input[type=email]", "value": "test@example.com", "description": "Enter email"}},
+        {{"action": "click", "selector": "button[type=submit]", "description": "Click submit"}},
+        {{"action": "check_url", "expected": "/dashboard", "description": "Verify redirect"}},
+        {{"action": "check_text", "text": "Welcome", "description": "Verify welcome message"}}
+      ]
+    }}
+  ]
+}}
+
+Available actions:
+- "goto": Navigate to URL. Params: url
+- "fill": Type into input. Params: selector, value
+- "click": Click element. Params: selector
+- "check_title": Check title contains text. Params: expected
+- "check_url": Check URL contains text. Params: expected
+- "check_visible": Check element visible. Params: selector
+- "check_text": Check page contains text. Params: text
+- "wait": Wait ms. Params: ms
+
+Rules:
+- Start each test with "goto" to the target URL
+- Use CSS selectors for elements
+- Be realistic about selectors
+- Include verification steps
+
+Return ONLY valid JSON, no markdown code blocks or extra text."""
+
+    try:
+        content = generate_with_fallback(client, prompt)
+        content = clean_json_response(content)
+        test_plans = json.loads(content)
+        results: List[TestResult] = []
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+
+            for plan in test_plans.get("test_plans", []):
+                test_case_id = plan["test_case_id"]
+                matching_tc = next(
+                    (tc for tc in request.test_cases if tc.id == test_case_id), None
+                )
+                if not matching_tc:
+                    continue
+
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = await context.new_page()
+                steps_executed: List[StepResult] = []
+                overall_status = "PASS"
+
+                for action_def in plan.get("actions", []):
+                    action = action_def.get("action", "")
+                    description = action_def.get("description", action)
+
+                    try:
+                        if action == "goto":
+                            nav_url = action_def.get("url", target_url)
+                            if not nav_url.startswith("http"):
+                                nav_url = f"{target_url}{nav_url}"
+                            response = await page.goto(
+                                nav_url, wait_until="domcontentloaded", timeout=15000
+                            )
+                            status_code = response.status if response else 0
+                            step_ok = 200 <= status_code < 400
+                            steps_executed.append(StepResult(
+                                step=description,
+                                status="PASS" if step_ok else "FAIL",
+                                output=f"Navigated to {nav_url} (HTTP {status_code})",
+                            ))
+                            if not step_ok:
+                                overall_status = "FAIL"
+
+                        elif action == "fill":
+                            selector = action_def.get("selector", "")
+                            value = action_def.get("value", "")
+                            try:
+                                await page.fill(selector, value, timeout=5000)
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="PASS",
+                                    output=f"Filled '{selector}' with value",
+                                ))
+                            except Exception:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"Element not found: {selector}",
+                                ))
+
+                        elif action == "click":
+                            selector = action_def.get("selector", "")
+                            try:
+                                await page.click(selector, timeout=5000)
+                                await page.wait_for_timeout(1000)
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="PASS",
+                                    output=f"Clicked: {selector}",
+                                ))
+                            except Exception:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"Element not clickable: {selector}",
+                                ))
+
+                        elif action == "check_title":
+                            expected = action_def.get("expected", "")
+                            title = await page.title()
+                            if expected.lower() in title.lower():
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="PASS",
+                                    output=f"Title '{title}' contains '{expected}'",
+                                ))
+                            else:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"Title '{title}' missing '{expected}'",
+                                ))
+
+                        elif action == "check_url":
+                            expected = action_def.get("expected", "")
+                            current_url = page.url
+                            if expected.lower() in current_url.lower():
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="PASS",
+                                    output=f"URL '{current_url}' contains '{expected}'",
+                                ))
+                            else:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"URL '{current_url}' missing '{expected}'",
+                                ))
+
+                        elif action == "check_visible":
+                            selector = action_def.get("selector", "")
+                            try:
+                                is_visible = await page.is_visible(selector, timeout=5000)
+                                if is_visible:
+                                    steps_executed.append(StepResult(
+                                        step=description,
+                                        status="PASS",
+                                        output=f"Element '{selector}' is visible",
+                                    ))
+                                else:
+                                    overall_status = "FAIL"
+                                    steps_executed.append(StepResult(
+                                        step=description,
+                                        status="FAIL",
+                                        output=f"Element '{selector}' not visible",
+                                    ))
+                            except Exception:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"Element '{selector}' not found",
+                                ))
+
+                        elif action == "check_text":
+                            text = action_def.get("text", "")
+                            page_content = await page.content()
+                            if text.lower() in page_content.lower():
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="PASS",
+                                    output=f"Page contains '{text}'",
+                                ))
+                            else:
+                                overall_status = "FAIL"
+                                steps_executed.append(StepResult(
+                                    step=description,
+                                    status="FAIL",
+                                    output=f"Page missing '{text}'",
+                                ))
+
+                        elif action == "wait":
+                            ms = action_def.get("ms", 1000)
+                            await page.wait_for_timeout(ms)
+                            steps_executed.append(StepResult(
+                                step=description,
+                                status="PASS",
+                                output=f"Waited {ms}ms",
+                            ))
+
+                        else:
+                            steps_executed.append(StepResult(
+                                step=description,
+                                status="PASS",
+                                output=f"Skipped unknown action '{action}'",
+                            ))
+
+                    except Exception as exc:
+                        overall_status = "FAIL"
+                        steps_executed.append(StepResult(
+                            step=description,
+                            status="FAIL",
+                            output=f"Browser error: {str(exc)[:200]}",
+                        ))
+
+                await context.close()
+                passed_steps = sum(1 for s in steps_executed if s.status == "PASS")
+                total_steps = len(steps_executed)
+                results.append(TestResult(
+                    test_case_id=test_case_id,
+                    test_case_title=matching_tc.title,
+                    test_type=matching_tc.type,
+                    status=overall_status,
+                    actual_result=f"{passed_steps}/{total_steps} steps passed on {target_url}",
+                    details=(
+                        f"Browser test: {total_steps} actions against "
+                        f"{target_url} using headless Chromium"
+                    ),
+                    steps_executed=steps_executed,
+                ))
+
+            await browser.close()
+
+        summary = build_summary(results)
+        return ExecuteTestsResponse(
+            results=results, summary=summary, execution_mode="browser_real"
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to parse AI test plan: {str(e)}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Browser test error: {str(e)}\n{traceback.format_exc()}",
+        )

@@ -5,7 +5,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { FlaskConical, Play, CheckCircle2, XCircle, AlertTriangle, Loader2, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
+import { Input } from '@/components/ui/input'
+import { FlaskConical, Play, CheckCircle2, XCircle, AlertTriangle, Loader2, ChevronDown, ChevronUp, Sparkles, Globe, Monitor, Cpu } from 'lucide-react'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -53,6 +54,9 @@ function App() {
   const [error, setError] = useState('')
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set())
   const [activeTab, setActiveTab] = useState('input')
+  const [executionMode, setExecutionMode] = useState<'ai' | 'http' | 'browser'>('ai')
+  const [targetUrl, setTargetUrl] = useState('')
+  const [executionModeLabel, setExecutionModeLabel] = useState('')
 
   const toggleResultExpanded = (id: number) => {
     setExpandedResults(prev => {
@@ -109,19 +113,36 @@ function App() {
       return
     }
 
+    if (executionMode !== 'ai' && !targetUrl.trim()) {
+      setError('Please enter a target URL for real testing')
+      return
+    }
+
     setIsExecuting(true)
     setError('')
     setTestResults([])
     setSummary(null)
 
+    // Choose endpoint based on execution mode
+    let endpoint = '/api/execute-tests'
+    if (executionMode === 'http') endpoint = '/api/execute-tests-http'
+    if (executionMode === 'browser') endpoint = '/api/execute-tests-browser'
+
+    const modeLabels = { ai: 'AI Simulated', http: 'HTTP Testing', browser: 'Browser Testing' }
+
     try {
-      const response = await fetch(`${API_URL}/api/execute-tests`, {
+      const payload: Record<string, unknown> = {
+        test_cases: testCases,
+        acceptance_criteria: acceptanceCriteria,
+      }
+      if (executionMode !== 'ai') {
+        payload.target_url = targetUrl
+      }
+
+      const response = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          test_cases: testCases,
-          acceptance_criteria: acceptanceCriteria,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (!response.ok) {
@@ -132,6 +153,7 @@ function App() {
       const data = await response.json()
       setTestResults(data.results)
       setSummary(data.summary)
+      setExecutionModeLabel(modeLabels[executionMode])
       setExpandedResults(new Set(data.results.map((r: TestResult) => r.test_case_id)))
       setActiveTab('results')
     } catch (err) {
@@ -332,17 +354,90 @@ function App() {
           {/* Test Cases Tab */}
           <TabsContent value="tests">
             <div className="space-y-4">
+              {/* Execution Mode Selector */}
+              <Card className="border-indigo-100">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">Execution Mode</CardTitle>
+                  <CardDescription>Choose how to execute the generated test cases</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <button
+                      onClick={() => setExecutionMode('ai')}
+                      className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all text-left ${
+                        executionMode === 'ai'
+                          ? 'border-indigo-500 bg-indigo-50'
+                          : 'border-slate-200 hover:border-slate-300 bg-white'
+                      }`}
+                    >
+                      <Cpu className={executionMode === 'ai' ? 'text-indigo-600' : 'text-slate-400'} size={24} />
+                      <div>
+                        <p className={`text-sm font-semibold ${executionMode === 'ai' ? 'text-indigo-900' : 'text-slate-700'}`}>AI Simulation</p>
+                        <p className="text-xs text-slate-500">AI reasons about pass/fail</p>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setExecutionMode('http')}
+                      className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all text-left ${
+                        executionMode === 'http'
+                          ? 'border-emerald-500 bg-emerald-50'
+                          : 'border-slate-200 hover:border-slate-300 bg-white'
+                      }`}
+                    >
+                      <Globe className={executionMode === 'http' ? 'text-emerald-600' : 'text-slate-400'} size={24} />
+                      <div>
+                        <p className={`text-sm font-semibold ${executionMode === 'http' ? 'text-emerald-900' : 'text-slate-700'}`}>HTTP Testing</p>
+                        <p className="text-xs text-slate-500">Real HTTP requests to URL</p>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setExecutionMode('browser')}
+                      className={`flex items-center gap-3 p-4 rounded-lg border-2 transition-all text-left ${
+                        executionMode === 'browser'
+                          ? 'border-purple-500 bg-purple-50'
+                          : 'border-slate-200 hover:border-slate-300 bg-white'
+                      }`}
+                    >
+                      <Monitor className={executionMode === 'browser' ? 'text-purple-600' : 'text-slate-400'} size={24} />
+                      <div>
+                        <p className={`text-sm font-semibold ${executionMode === 'browser' ? 'text-purple-900' : 'text-slate-700'}`}>Browser Testing</p>
+                        <p className="text-xs text-slate-500">Headless Chromium via Playwright</p>
+                      </div>
+                    </button>
+                  </div>
+
+                  {executionMode !== 'ai' && (
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1.5 block">
+                        Target URL <span className="text-red-500">*</span>
+                      </label>
+                      <Input
+                        placeholder="https://example.com"
+                        value={targetUrl}
+                        onChange={(e) => setTargetUrl(e.target.value)}
+                        className="border-slate-200 focus:border-indigo-300 focus:ring-indigo-200"
+                      />
+                      <p className="text-xs text-slate-500 mt-1">
+                        {executionMode === 'http'
+                          ? 'The backend will make real HTTP requests to this URL to test your application.'
+                          : 'A headless Chromium browser will navigate to this URL and interact with the page.'}
+                      </p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-slate-900">Generated Test Cases</h2>
                 <Button
                   onClick={handleExecuteTests}
-                  disabled={isExecuting || testCases.length === 0}
+                  disabled={isExecuting || testCases.length === 0 || (executionMode !== 'ai' && !targetUrl.trim())}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white"
                 >
                   {isExecuting ? (
                     <>
                       <Loader2 className="animate-spin" size={18} />
-                      Executing Tests...
+                      {executionMode === 'ai' ? 'Simulating...' : executionMode === 'http' ? 'Testing via HTTP...' : 'Testing via Browser...'}
                     </>
                   ) : (
                     <>
@@ -390,6 +485,19 @@ function App() {
           {/* Results Tab */}
           <TabsContent value="results">
             <div className="space-y-6">
+              {/* Execution Mode Banner */}
+              {executionModeLabel && (
+                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center gap-2">
+                  {executionMode === 'ai' ? <Cpu size={16} className="text-indigo-600" /> :
+                   executionMode === 'http' ? <Globe size={16} className="text-emerald-600" /> :
+                   <Monitor size={16} className="text-purple-600" />}
+                  <span className="text-sm font-medium text-slate-700">Execution Mode: {executionModeLabel}</span>
+                  {targetUrl && executionMode !== 'ai' && (
+                    <span className="text-sm text-slate-500">| Target: {targetUrl}</span>
+                  )}
+                </div>
+              )}
+
               {/* Summary Cards */}
               {summary && (
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
