@@ -119,8 +119,13 @@ def get_gemini_client() -> Any:
     """
 
     key = os.getenv("GEMINI_API_KEY", "")
+    use_mock = os.getenv("USE_MOCK_AI", "false").lower() in ("1", "true", "yes")
+    # When `USE_MOCK_AI` is truthy, return None so endpoints run in dev-mode
+    # and produce canned/simulated responses without a real Gemini key.
+    if use_mock:
+        return None
     if not key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured; set USE_MOCK_AI=true for local dev")
     return genai.Client(api_key=key)
 
 
@@ -242,9 +247,52 @@ Return your response as a JSON object with this exact structure:
 Return ONLY valid JSON, no markdown code blocks or extra text."""
 
     try:
-        content = generate_with_fallback(client, prompt)
-        content = clean_json_response(content)
-        parsed = json.loads(content)
+        # If no Gemini client is available (dev mode), return a canned sample response
+        if client is None:
+            parsed = {
+                "test_cases": [
+                    {
+                        "id": 1,
+                        "type": "positive",
+                        "title": "Happy path - valid credentials",
+                        "description": "User with valid credentials can log in and reach the dashboard",
+                        "steps": [
+                            "Navigate to login page",
+                            "Enter valid email and password",
+                            "Click submit"
+                        ],
+                        "expected_result": "User is redirected to the dashboard and welcome message is shown"
+                    },
+                    {
+                        "id": 2,
+                        "type": "negative",
+                        "title": "Invalid password shows error",
+                        "description": "Incorrect password should show an error message",
+                        "steps": [
+                            "Navigate to login page",
+                            "Enter valid email and invalid password",
+                            "Click submit"
+                        ],
+                        "expected_result": "An 'Invalid password' error message is displayed"
+                    },
+                    {
+                        "id": 3,
+                        "type": "edge_case",
+                        "title": "Empty password field",
+                        "description": "Submitting with empty password should show validation error",
+                        "steps": [
+                            "Navigate to login page",
+                            "Leave password empty",
+                            "Click submit"
+                        ],
+                        "expected_result": "A validation message about required password is shown"
+                    }
+                ]
+            }
+        else:
+            content = generate_with_fallback(client, prompt)
+            content = clean_json_response(content)
+            parsed = json.loads(content)
 
         # Validate shape before constructing Pydantic objects.
         if "test_cases" not in parsed or not isinstance(parsed["test_cases"], list):
@@ -311,9 +359,29 @@ Return your response as a JSON object with this exact structure:
 Return ONLY valid JSON, no markdown code blocks or extra text."""
 
     try:
-        content = generate_with_fallback(client, prompt)
-        content = clean_json_response(content)
-        parsed = json.loads(content)
+        # Dev-mode canned execution when no Gemini client is available.
+        if client is None:
+            parsed = {"results": []}
+            for tc in request.test_cases:
+                # Simple heuristic for dev: mark positive/negative as PASS, edge_case as FAIL
+                status = "PASS" if tc.type in ("positive", "negative") else "FAIL"
+                steps_executed = []
+                for step in tc.steps:
+                    steps_executed.append({"step": step, "status": status, "output": f"Simulated output for '{step}'"})
+
+                parsed["results"].append({
+                    "test_case_id": tc.id,
+                    "test_case_title": tc.title,
+                    "test_type": tc.type,
+                    "status": status,
+                    "actual_result": tc.expected_result if status == "PASS" else f"Simulated failure for {tc.title}",
+                    "details": f"This is a simulated execution (dev mode). Marked {status}.",
+                    "steps_executed": steps_executed,
+                })
+        else:
+            content = generate_with_fallback(client, prompt)
+            content = clean_json_response(content)
+            parsed = json.loads(content)
 
         results = [TestResult(**r) for r in parsed.get("results", [])]
         summary = build_summary(results)

@@ -74,3 +74,41 @@ The frontend will start at http://localhost:5173
 ## Documentation
 
 See the [Complete Guide](docs/GUIDE.md) for detailed setup instructions, API reference, architecture overview, and troubleshooting.
+
+## Developer Quickstart
+
+Use the included Makefile and script to simplify local development:
+
+- Install dependencies (backend + frontend):
+
+```bash
+make install
+```
+
+- Start both services (backend + frontend):
+
+```bash
+make dev
+# or run directly
+./scripts/dev.sh start
+```
+
+- Stop both services:
+
+```bash
+make stop
+# or
+./scripts/dev.sh stop
+```
+
+- Check status:
+
+```bash
+make status
+# or
+./scripts/dev.sh status
+```
+
+Notes:
+- The backend respects the `USE_MOCK_AI` environment variable. Set `USE_MOCK_AI=true` in `test-automation-backend/.env` to use simulated AI responses for local development without a Gemini API key. Set it to `false` and provide `GEMINI_API_KEY` to use the real Gemini service.
+- The dev script writes PID files to `.dev/pids/`.
