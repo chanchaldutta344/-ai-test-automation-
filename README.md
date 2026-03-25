@@ -52,7 +52,9 @@ The frontend will start at http://localhost:5173
 
 - `GET /healthz` - Health check
 - `POST /api/generate-tests` - Generate test cases from acceptance criteria
-- `POST /api/execute-tests` - Execute test cases and get results
+- `POST /api/execute-tests` - Execute test cases (AI simulation)
+- `POST /api/execute-tests-http` - Execute test cases via real HTTP requests against a target URL
+- `POST /api/execute-tests-browser` - Execute test cases via headless Chromium browser (Playwright)
 
 ## Application Flow
 

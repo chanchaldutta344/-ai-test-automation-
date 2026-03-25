@@ -445,9 +445,30 @@ Rules:
 Return ONLY valid JSON, no markdown code blocks or extra text."""
 
     try:
-        content = generate_with_fallback(client, prompt)
-        content = clean_json_response(content)
-        test_plans = json.loads(content)
+        # Dev-mode canned HTTP test plan when no Gemini client is available.
+        if client is None:
+            test_plans = {
+                "test_plans": [
+                    {
+                        "test_case_id": tc.id,
+                        "requests": [
+                            {
+                                "method": "GET",
+                                "path": "/",
+                                "headers": {},
+                                "body": None,
+                                "expected_status": 200,
+                                "description": f"Load homepage for '{tc.title}'",
+                            }
+                        ],
+                    }
+                    for tc in request.test_cases
+                ]
+            }
+        else:
+            content = generate_with_fallback(client, prompt)
+            content = clean_json_response(content)
+            test_plans = json.loads(content)
         results: List[TestResult] = []
 
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http_client:
@@ -610,9 +631,25 @@ Rules:
 Return ONLY valid JSON, no markdown code blocks or extra text."""
 
     try:
-        content = generate_with_fallback(client, prompt)
-        content = clean_json_response(content)
-        test_plans = json.loads(content)
+        # Dev-mode canned browser test plan when no Gemini client is available.
+        if client is None:
+            test_plans = {
+                "test_plans": [
+                    {
+                        "test_case_id": tc.id,
+                        "actions": [
+                            {"action": "goto", "url": target_url, "description": f"Navigate to {target_url}"},
+                            {"action": "check_title", "expected": "", "description": "Check page has a title"},
+                            {"action": "check_text", "text": ".", "description": f"Verify page has content for '{tc.title}'"},
+                        ],
+                    }
+                    for tc in request.test_cases
+                ]
+            }
+        else:
+            content = generate_with_fallback(client, prompt)
+            content = clean_json_response(content)
+            test_plans = json.loads(content)
         results: List[TestResult] = []
 
         async with async_playwright() as pw:
